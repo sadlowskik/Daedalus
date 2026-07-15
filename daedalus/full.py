@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from .rope import RoPEAttention
 from .moe import MoELayer, load_balance_loss
 from .memory import Mnemosyne
+from .ariadne import ponder_loss
 
 
 class RoPEMoEBlock(nn.Module):
@@ -131,3 +132,75 @@ class DaedalusFull(nn.Module):
             b, t, v = logits.shape
             ce = F.cross_entropy(logits.view(b * t, v), targets.view(b * t))
         return logits, ce, aux
+
+
+class DaedalusFullAdaptive(nn.Module):
+    """DaedalusFull with PonderNet adaptive halting on the FINAL recurrent core.
+
+    Every stage but the last runs a fixed number of loops (with interleaved
+    memory). The final core loops up to `max_loops`, with a halting head
+    producing a per-token halting distribution; its output is applied per step
+    via the coda. This localizes adaptive depth to where the output is produced,
+    which composes cleanly with the interleaved memory stack.
+
+    forward() returns (expected_logits, loss, extras). `extras` holds the aux
+    (MoE load-balance) loss, the halting distribution `p`, and `l_rec`/`l_kl`.
+    Train with a stronger `beta` (e.g. 0.1) so halting does not collapse to
+    max depth.
+    """
+
+    def __init__(self, vocab_size: int = 256, n_embd: int = 128, n_head: int = 4,
+                 block_size: int = 256, core_layers: int = 2, fixed_loops: int = 3,
+                 max_loops: int = 6, n_experts: int = 8, top_k: int = 2, n_shared: int = 1,
+                 hidden: Optional[int] = None, n_gist: int = 16, n_stages: int = 2):
+        super().__init__()
+        hidden = hidden or n_embd
+        self.tok_emb = nn.Embedding(vocab_size, n_embd)
+        self.stages = nn.ModuleList([
+            RecurrentMoECore(n_embd, n_head, block_size, core_layers,
+                             n_experts, top_k, n_shared, hidden)
+            for _ in range(n_stages)
+        ])
+        self.memories = nn.ModuleList([
+            MemoryLayer(n_embd, n_gist, n_head) for _ in range(n_stages - 1)
+        ])
+        self.halt = nn.Linear(n_embd, 1)
+        self.ln_f = nn.LayerNorm(n_embd)
+        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.fixed_loops, self.max_loops, self.block_size = fixed_loops, max_loops, block_size
+
+    def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None,
+                lambda_prior: float = 0.2, beta: float = 0.01, alpha: float = 0.01):
+        e = self.tok_emb(idx)
+        x = e
+        aux = x.new_zeros(())
+        # fixed preprocessing stages + interleaved memory
+        for i in range(len(self.stages) - 1):
+            x, a = self.stages[i](x, e, self.fixed_loops)
+            aux = aux + a
+            x = self.memories[i](x)
+        # adaptive final core (PonderNet halting)
+        final = self.stages[-1]
+        still = torch.ones(idx.shape, device=idx.device)
+        p_list, logits_list = [], []
+        for n in range(1, self.max_loops + 1):
+            x = x + e
+            for blk in final.blocks:
+                x, scores = blk(x)
+                aux = aux + load_balance_loss(
+                    scores, scores.topk(blk.moe.top_k, -1)[1], blk.moe.n_experts)
+            lam = (torch.sigmoid(self.halt(x)).squeeze(-1) if n < self.max_loops
+                   else torch.ones(idx.shape, device=idx.device))
+            p_list.append(still * lam)
+            still = still * (1 - lam)
+            logits_list.append(self.lm_head(self.ln_f(x)))
+        p = torch.stack(p_list, 0)
+        logits = torch.stack(logits_list, 0)
+        exp_logits = (p.unsqueeze(-1) * logits).sum(0)
+        extras = {"aux": aux, "p": p}
+        loss = None
+        if targets is not None:
+            pond, l_rec, l_kl = ponder_loss(p, logits, targets, lambda_prior, beta)
+            loss = pond + alpha * aux
+            extras.update(l_rec=l_rec, l_kl=l_kl)
+        return exp_logits, loss, extras

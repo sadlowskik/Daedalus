@@ -20,7 +20,8 @@ from .moe import (Expert, Router, MoELayer, MoEBlock, DaedalusMoE, load_balance_
 from .unified import UnifiedDaedalus
 from .memory import Mnemosyne, MemoryModel, Scribe
 from .rope import build_rope_cache, rotate_half, apply_rope, RoPEAttention
-from .full import DaedalusFull, RoPEMoEBlock, RecurrentMoECore, MemoryLayer
+from .full import (DaedalusFull, DaedalusFullAdaptive, RoPEMoEBlock,
+                   RecurrentMoECore, MemoryLayer)
 
 __version__ = "0.2.0"
 
@@ -33,5 +34,5 @@ __all__ = [
     "UnifiedDaedalus",
     "Mnemosyne", "MemoryModel", "Scribe",
     "build_rope_cache", "rotate_half", "apply_rope", "RoPEAttention",
-    "DaedalusFull", "RoPEMoEBlock", "RecurrentMoECore", "MemoryLayer",
+    "DaedalusFull", "DaedalusFullAdaptive", "RoPEMoEBlock", "RecurrentMoECore", "MemoryLayer",
 ]

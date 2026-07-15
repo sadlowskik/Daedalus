@@ -13,7 +13,8 @@ from daedalus import (ByteTokenizer, Embeddings, Head, MultiHeadAttention, Block
                       Daedalus, Labyrinth, Ariadne, ponder_loss,
                       MoELayer, load_balance_loss, DaedalusMoE, UnifiedDaedalus,
                       Mnemosyne, Scribe,
-                      build_rope_cache, apply_rope, RoPEAttention, DaedalusFull)
+                      build_rope_cache, apply_rope, RoPEAttention, DaedalusFull,
+                      DaedalusFullAdaptive)
 
 B, T, C, V = 4, 16, 128, 256
 
@@ -143,6 +144,20 @@ def test_daedalus_full_forward_and_init_loss():
     # test-time depth dial: different loop counts give different outputs
     with torch.no_grad():
         assert not torch.allclose(model(x, n_loops=2)[0], model(x, n_loops=5)[0])
+
+
+def test_daedalus_full_adaptive_halting():
+    torch.manual_seed(0)
+    model = DaedalusFullAdaptive(n_embd=64, n_head=4, block_size=T, core_layers=2,
+                                 max_loops=5, n_stages=2)
+    x = torch.randint(0, V, (B, T)); y = torch.randint(0, V, (B, T))
+    logits, loss, ex = model(x, y, beta=0.1)
+    assert logits.shape == (B, T, V)
+    # halting distribution over the final core sums to 1 per token
+    assert torch.allclose(ex["p"].sum(0), torch.ones_like(ex["p"].sum(0)), atol=1e-5)
+    # expectation-weighted reconstruction loss ~ ln(vocab) at init
+    assert abs(ex["l_rec"].item() - math.log(V)) < 0.6
+    assert loss is not None and ex["aux"].item() >= 1.0 - 1e-3
 
 
 def test_scribe_exact_extraction():
