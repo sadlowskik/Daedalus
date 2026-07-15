@@ -19,8 +19,10 @@ from .ariadne import Ariadne, ponder_loss, expected_steps
 from .moe import (Expert, Router, MoELayer, MoEBlock, DaedalusMoE, load_balance_loss)
 from .unified import UnifiedDaedalus
 from .memory import Mnemosyne, MemoryModel, Scribe
+from .rope import build_rope_cache, rotate_half, apply_rope, RoPEAttention
+from .full import DaedalusFull, RoPEMoEBlock, RecurrentMoECore, MemoryLayer
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "ByteTokenizer",
@@ -30,4 +32,6 @@ __all__ = [
     "Expert", "Router", "MoELayer", "MoEBlock", "DaedalusMoE", "load_balance_loss",
     "UnifiedDaedalus",
     "Mnemosyne", "MemoryModel", "Scribe",
+    "build_rope_cache", "rotate_half", "apply_rope", "RoPEAttention",
+    "DaedalusFull", "RoPEMoEBlock", "RecurrentMoECore", "MemoryLayer",
 ]

@@ -36,6 +36,10 @@ piece does:
   because a single hallucinated identifier breaks compilation.
 - **Unified (Mixture-of-Recursions).** Loop a *shared MoE core*: recurrent depth
   and sparse experts at once. *(Bae et al. 2025.)*
+- **DaedalusFull.** The whole architecture in one model: RoPE positions + MoE +
+  input injection + interleaved memory (`core -> memory -> core`) + variable-loop
+  recurrence. *(RoPE: Su et al. 2021; input injection: Huginn; interleaved
+  memory: Block-Recurrent Transformer, Hutchins et al. 2022 / RMT.)*
 
 ## Results (toy scale)
 
@@ -54,6 +58,17 @@ impress:
   `corr(depth, difficulty) ≈ +0.12` — real but weak at this scale).
 - **Mnemosyne** memory helps: predicting a segment with the compressed gist of
   the previous 128 tokens beats predicting it without, by ~0.39 nats.
+
+**Flagship — `DaedalusFull` on Rust.** The fully integrated model (1.66M params,
+RoPE + MoE + injection + interleaved memory + variable-loop recurrence), trained
+on ~11M tokens of Rust (ripgrep, tokio, serde, clap, bat) on a single T4:
+reaches **0.88 val loss (1.26 bits/byte)** in ~13 min, still descending. All 8
+experts stay balanced under recurrence + interleaving; the test-time depth dial
+survives (coherent generations at `r=3` and `r=5`). It generates Rust-textured
+output — lifetimes, macros, `impl` blocks, byte strings — but not yet correct
+code, exactly as expected at this size. *(The 1.26 bits/byte is not comparable
+to the Python numbers above: Rust from a few repos is more repetitive, the model
+is larger, and the context is longer.)*
 
 **Honest scope:** at this size, expert and depth specialization is *structural*
 (whitespace, case, punctuation), not *semantic*. Semantic specialization needs
@@ -97,8 +112,10 @@ pip install pytest && pytest -q
 
 ## Roadmap
 
-- [ ] RoPE positions (currently learned-absolute)
-- [ ] Input injection into the recurrent core (Huginn-style)
+- [x] RoPE positions (`daedalus/rope.py`)
+- [x] Input injection into the recurrent core (Huginn-style)
+- [x] Integrated `DaedalusFull` + first Rust training run
+- [ ] Fuse adaptive halting (Ariadne) into `DaedalusFull`
 - [ ] DeepSeek-style auxiliary-loss-free load balancing
 - [ ] `transformers`-compatible model class (for LoRA / vLLM ecosystem)
 - [ ] Scale up the compute ladder (100M → 1B) and release weights

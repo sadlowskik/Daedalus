@@ -69,6 +69,7 @@ class MoELayer(nn.Module):
         self.experts = nn.ModuleList([Expert(n_embd, hidden) for _ in range(n_experts)])
         self.shared = nn.ModuleList([Expert(n_embd, hidden) for _ in range(n_shared)])
         self.top_k = top_k
+        self.n_experts = n_experts
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         b, t, c = x.shape

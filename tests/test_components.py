@@ -12,7 +12,8 @@ import torch
 from daedalus import (ByteTokenizer, Embeddings, Head, MultiHeadAttention, Block,
                       Daedalus, Labyrinth, Ariadne, ponder_loss,
                       MoELayer, load_balance_loss, DaedalusMoE, UnifiedDaedalus,
-                      Mnemosyne, Scribe)
+                      Mnemosyne, Scribe,
+                      build_rope_cache, apply_rope, RoPEAttention, DaedalusFull)
 
 B, T, C, V = 4, 16, 128, 256
 
@@ -107,6 +108,41 @@ def test_mnemosyne_compresses():
     mn = Mnemosyne(C, n_gist=16)
     g = mn(torch.randn(B, T, C))
     assert g.shape == (B, 16, C)
+
+
+def test_rope_relative_position_invariance():
+    cos, sin = build_rope_cache(128, 32)
+    u, w = torch.randn(32), torch.randn(32)
+
+    def score(m, n):
+        qu = apply_rope(u.view(1, -1), cos[m:m+1], sin[m:m+1])
+        kv = apply_rope(w.view(1, -1), cos[n:n+1], sin[n:n+1])
+        return (qu * kv).sum().item()
+
+    # same distance apart, different absolute positions -> same score
+    assert abs(score(5, 3) - score(60, 58)) < 1e-3
+
+
+def test_rope_attention_is_causal():
+    attn = RoPEAttention(C, 4, T)
+    x = torch.randn(B, T, C)
+    o1 = attn(x)
+    x2 = x.clone(); x2[:, -1] += 10.0
+    assert torch.allclose(o1[:, :-1], attn(x2)[:, :-1], atol=1e-5)
+
+
+def test_daedalus_full_forward_and_init_loss():
+    torch.manual_seed(0)
+    model = DaedalusFull(n_embd=64, n_head=4, block_size=T, core_layers=2, n_stages=2)
+    x = torch.randint(0, V, (B, T)); y = torch.randint(0, V, (B, T))
+    logits, ce, aux = model(x, y)
+    assert logits.shape == (B, T, V)
+    assert abs(ce.item() - math.log(V)) < 0.6
+    # aux accumulates one balanced (~1.0) term per MoE application (stages*loops*layers)
+    assert aux.item() >= 1.0 - 1e-3
+    # test-time depth dial: different loop counts give different outputs
+    with torch.no_grad():
+        assert not torch.allclose(model(x, n_loops=2)[0], model(x, n_loops=5)[0])
 
 
 def test_scribe_exact_extraction():
