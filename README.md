@@ -98,10 +98,23 @@ logits, _ = model(ids, n_loops=8)         # think deeper at inference (train var
 Prepare data and train:
 
 ```bash
-python data.py  --source /usr/lib/python3.12 --out ./data
-python train.py --model labyrinth --iters 3000 --variable-loops
-python train.py --model moe       --iters 3000
-python train.py --model unified   --iters 2500
+# option A: local source files (e.g. the Python stdlib)
+python data.py --source /usr/lib/python3.12 --out ./data
+
+# option B: fetch a Rust corpus by cloning GitHub repos (needs internet + git)
+python scripts/fetch_rust.py --out ./data --ext rs
+
+# train (checkpoint-and-resume; long runs can span multiple sessions)
+python train.py --model labyrinth --steps 3000 --variable-loops
+python train.py --model moe       --steps 3000
+python train.py --model adaptive  --n-embd 512 --core-layers 3 --steps 40000 --resume
+```
+
+Generate from a checkpoint:
+
+```bash
+python generate.py --checkpoint checkpoint.pt --model adaptive \
+    --n-embd 512 --core-layers 3 --prompt "fn " --rep-pen 1.4
 ```
 
 Run the test suite (the isolation checks that validate every component):
@@ -109,6 +122,22 @@ Run the test suite (the isolation checks that validate every component):
 ```bash
 pip install pytest && pytest -q
 ```
+
+## Scaling notes (honest)
+
+A ~37M-param `DaedalusFullAdaptive` trained on ~117M tokens of Rust reaches a low
+byte-level loss quickly (~0.46 bits/byte) — but early generation collapses into
+whitespace. Two reasons, both worth knowing:
+
+1. **Loss ≠ capability.** Deeply-nested code is dominated by indentation, so a
+   model can drive loss down by mastering whitespace long before it learns real
+   structure. Watch *generation*, not just the loss curve.
+2. **Redundant data inflates the number.** Scraped repos share boilerplate,
+   generated code, and near-duplicate files, so low loss partly reflects how
+   predictable the data is.
+
+Coherent code needs (a) much more training (this is <1 epoch), (b) more/cleaner
+data (the full Stack, deduped), and (c) scale. See the roadmap.
 
 ## Roadmap
 
