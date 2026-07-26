@@ -137,5 +137,5 @@ class DaedalusMoE(nn.Module):
         ce = None
         if targets is not None:
             b, t, v = logits.shape
-            ce = F.cross_entropy(logits.view(b * t, v), targets.view(b * t))
+            ce = F.cross_entropy(logits.view(b * t, v), targets.reshape(b * t))
         return logits, ce, aux

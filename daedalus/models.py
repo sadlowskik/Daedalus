@@ -30,7 +30,7 @@ class Daedalus(nn.Module):
         loss = None
         if targets is not None:
             b, t, v = logits.shape
-            loss = F.cross_entropy(logits.view(b * t, v), targets.view(b * t))
+            loss = F.cross_entropy(logits.view(b * t, v), targets.reshape(b * t))
         return logits, loss
 
 
@@ -46,19 +46,25 @@ class Labyrinth(nn.Module):
     only if trained with a *variable* loop count (see train.py --variable-loops),
     otherwise the model overfits to one depth and diverges at others.
 
+    `mixer` chooses how the core mixes tokens: "softmax" (default, unchanged
+    behaviour) or "moirai" (gated fast-weight linear attention). The mixer is an
+    axis orthogonal to loop depth and expert routing.
+
     References: Universal Transformer (Dehghani et al., 2018); Huginn (Geiping
     et al., 2025); Ouro; Deep Equilibrium Models (Bai et al., 2019).
     """
 
     def __init__(self, vocab_size: int = 256, n_embd: int = 128, n_head: int = 4,
-                 core_layers: int = 3, n_loops: int = 4, block_size: int = 128):
+                 core_layers: int = 3, n_loops: int = 4, block_size: int = 128,
+                 mixer: str = "softmax"):
         super().__init__()
         self.emb = Embeddings(vocab_size, n_embd, block_size)
-        self.core = nn.ModuleList([Block(n_embd, n_head, block_size) for _ in range(core_layers)])
+        self.core = nn.ModuleList([Block(n_embd, n_head, block_size, mixer)
+                                   for _ in range(core_layers)])
         self.n_loops = n_loops
         self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
-        self.block_size = block_size
+        self.block_size, self.mixer = block_size, mixer
 
     def forward(self, idx: torch.Tensor, targets: Optional[torch.Tensor] = None,
                 n_loops: Optional[int] = None
@@ -72,5 +78,5 @@ class Labyrinth(nn.Module):
         loss = None
         if targets is not None:
             b, t, v = logits.shape
-            loss = F.cross_entropy(logits.view(b * t, v), targets.view(b * t))
+            loss = F.cross_entropy(logits.view(b * t, v), targets.reshape(b * t))
         return logits, loss

@@ -4,6 +4,11 @@ Example:
     python generate.py --checkpoint checkpoint.pt --model adaptive \
         --prompt "fn " --n-embd 512 --core-layers 3 --n-stages 2 --n-gist 32 \
         --block-size 256 --rep-pen 1.4
+
+Architecture flags must match the training run or the checkpoint will not load.
+That includes the newer shape-changing ones: --mixer (softmax/moirai),
+--n-mem-banks (Naiads) and --self-referential (Proteus). --echo-weight is a
+training-only loss term, adds no parameters, and has no counterpart here.
 """
 from __future__ import annotations
 import argparse
@@ -11,17 +16,19 @@ import torch
 import torch.nn.functional as F
 
 from daedalus import (ByteTokenizer, Daedalus, Labyrinth, DaedalusMoE,
-                      UnifiedDaedalus, DaedalusFull, DaedalusFullAdaptive)
+                      UnifiedDaedalus, DaedalusFull, DaedalusFullAdaptive,
+                      DaedalusProteus)
 
 
 def build(name, args, device):
     c = dict(vocab_size=256, n_embd=args.n_embd, n_head=args.n_head, block_size=args.block_size)
     if name == "dense":     return Daedalus(**c, n_layer=args.n_layer).to(device)
-    if name == "labyrinth": return Labyrinth(**c, core_layers=args.core_layers, n_loops=args.n_loops).to(device)
+    if name == "labyrinth": return Labyrinth(**c, core_layers=args.core_layers, n_loops=args.n_loops, mixer=args.mixer).to(device)
     if name == "moe":       return DaedalusMoE(**c, n_layer=args.n_layer, n_experts=args.n_experts).to(device)
     if name == "unified":   return UnifiedDaedalus(**c, core_layers=args.core_layers, n_loops=args.n_loops, n_experts=args.n_experts).to(device)
-    if name == "full":      return DaedalusFull(**c, core_layers=args.core_layers, n_loops=args.n_loops, n_experts=args.n_experts, n_gist=args.n_gist, n_stages=args.n_stages).to(device)
-    if name == "adaptive":  return DaedalusFullAdaptive(**c, core_layers=args.core_layers, max_loops=args.max_loops, n_experts=args.n_experts, n_gist=args.n_gist, n_stages=args.n_stages).to(device)
+    if name == "full":      return DaedalusFull(**c, core_layers=args.core_layers, n_loops=args.n_loops, n_experts=args.n_experts, n_gist=args.n_gist, n_stages=args.n_stages, n_mem_banks=args.n_mem_banks).to(device)
+    if name == "adaptive":  return DaedalusFullAdaptive(**c, core_layers=args.core_layers, max_loops=args.max_loops, n_experts=args.n_experts, n_gist=args.n_gist, n_stages=args.n_stages, n_mem_banks=args.n_mem_banks).to(device)
+    if name == "proteus":   return DaedalusProteus(**c, n_layer=args.n_layer, self_referential=args.self_referential).to(device)
     raise ValueError(name)
 
 
@@ -50,7 +57,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--model", default="adaptive",
-                    choices=["dense", "labyrinth", "moe", "unified", "full", "adaptive"])
+                    choices=["dense", "labyrinth", "moe", "unified", "full", "adaptive",
+                             "proteus"])
     ap.add_argument("--prompt", default="fn ")
     ap.add_argument("--n-embd", type=int, default=512)
     ap.add_argument("--n-head", type=int, default=8)
@@ -66,6 +74,10 @@ def main():
     ap.add_argument("--temp", type=float, default=0.9)
     ap.add_argument("--top-k", type=int, default=50)
     ap.add_argument("--rep-pen", type=float, default=1.3)
+    # must match the training run, or the checkpoint will not load
+    ap.add_argument("--mixer", default="softmax", choices=["softmax", "moirai"])
+    ap.add_argument("--n-mem-banks", type=int, default=1)
+    ap.add_argument("--self-referential", action="store_true")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

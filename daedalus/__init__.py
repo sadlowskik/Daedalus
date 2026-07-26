@@ -11,6 +11,10 @@ each name describing what the piece does:
     Themis       the always-on shared experts (coding standards)
     Mnemosyne    lossy gist memory (high-level recollection)
     Scribe       exact symbol table (never approximated)
+    Moirai       gated fast-weight mixer (spin, measure, cut the thread)
+    Naiads       many memory banks, each its own spring (mixture-of-memories)
+    Echo         loop self-distillation (the shallow pass repeats the deep one)
+    Proteus      weights that rewrite themselves (experimental, isolated)
 """
 from .tokenizer import ByteTokenizer
 from .layers import Embeddings, Head, MultiHeadAttention, FeedForward, Block
@@ -22,8 +26,12 @@ from .memory import Mnemosyne, MemoryModel, Scribe
 from .rope import build_rope_cache, rotate_half, apply_rope, RoPEAttention
 from .full import (DaedalusFull, DaedalusFullAdaptive, RoPEMoEBlock,
                    RecurrentMoECore, MemoryLayer)
+from .moirai import MoiraiMixer
+from .naiads import Naiads
+from .echo import echo_loss, echo_step, echo_from_steps
+from .proteus import SelfModifyingLinear, ProteusBlock, DaedalusProteus
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ByteTokenizer",
@@ -35,4 +43,8 @@ __all__ = [
     "Mnemosyne", "MemoryModel", "Scribe",
     "build_rope_cache", "rotate_half", "apply_rope", "RoPEAttention",
     "DaedalusFull", "DaedalusFullAdaptive", "RoPEMoEBlock", "RecurrentMoECore", "MemoryLayer",
+    "MoiraiMixer",
+    "Naiads",
+    "echo_loss", "echo_step", "echo_from_steps",
+    "SelfModifyingLinear", "ProteusBlock", "DaedalusProteus",
 ]

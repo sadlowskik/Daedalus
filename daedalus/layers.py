@@ -80,12 +80,23 @@ class Block(nn.Module):
 
     Maps (B, T, n_embd) -> (B, T, n_embd), which is what makes it stackable AND
     loopable (see Labyrinth).
+
+    `mixer` selects how tokens talk to each other: "softmax" (default, standard
+    causal self-attention) or "moirai" (gated fast-weight linear attention, see
+    moirai.MoiraiMixer). Both are (B, T, C) -> (B, T, C), so they are
+    interchangeable; only "softmax" keeps a growing KV cache.
     """
 
-    def __init__(self, n_embd: int, n_head: int, block_size: int):
+    def __init__(self, n_embd: int, n_head: int, block_size: int, mixer: str = "softmax"):
         super().__init__()
         self.ln1 = nn.LayerNorm(n_embd)
-        self.attn = MultiHeadAttention(n_embd, n_head, block_size)
+        if mixer == "softmax":
+            self.attn = MultiHeadAttention(n_embd, n_head, block_size)
+        elif mixer == "moirai":
+            from .moirai import MoiraiMixer          # local: avoids an import cycle
+            self.attn = MoiraiMixer(n_embd, n_head, block_size)
+        else:
+            raise ValueError(f"unknown mixer: {mixer!r} (expected 'softmax' or 'moirai')")
         self.ln2 = nn.LayerNorm(n_embd)
         self.ff = FeedForward(n_embd)
 
