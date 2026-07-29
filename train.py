@@ -335,7 +335,30 @@ def main():
     start, best = 0, float("inf")
     if args.init_from:
         ck = torch.load(args.init_from, map_location=device, weights_only=False)
-        missing, unexpected = model.load_state_dict(ck["model"], strict=False)
+        state = ck["model"] if "model" in ck else ck
+        here = model.state_dict()
+        bad = {k: (tuple(v.shape), tuple(here[k].shape)) for k, v in state.items()
+               if k in here and v.shape != here[k].shape}
+        if bad:
+            old_v = ck.get("args", {}).get("vocab_size", "?")
+            lines = "\n".join(f"    {k}: checkpoint {a} vs model {b}"
+                              for k, (a, b) in list(bad.items())[:6])
+            raise SystemExit(
+                f"\n--init-from {args.init_from} is not compatible with this "
+                f"configuration:\n{lines}\n\n"
+                f"  The checkpoint was trained with vocab_size={old_v}; this run "
+                f"uses {args.vocab_size}.\n"
+                "  Embeddings are not transferable across tokenizers -- row 42 of "
+                "the old table\n"
+                "  means a raw byte, row 42 of the new one means a BPE token. "
+                "There is nothing\n"
+                "  to carry over, so train this phase from scratch (drop "
+                "--init-from).\n\n"
+                "  --init-from is for continuing a run onto NEW DATA with the "
+                "SAME tokenizer,\n"
+                "  which is exactly the phase-1 -> phase-2 handoff in "
+                "TRAINING.md.")
+        missing, unexpected = model.load_state_dict(state, strict=False)
         print(f"init-from {args.init_from}: {len(missing)} missing, "
               f"{len(unexpected)} unexpected keys; fresh optimizer + schedule")
     if args.resume and os.path.exists(args.out):
