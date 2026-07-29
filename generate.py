@@ -79,6 +79,35 @@ def generate(model, tok, prompt, device, n=400, temp=0.9, top_k=50, top_p=0.0,
     return prompt + tok.decode(idx[0, start:].tolist())
 
 
+def resolve_config(ck, overrides=None):
+    """Merge a checkpoint's recorded architecture with any explicit overrides."""
+    cfg = dict(ck.get("args") or {}) if isinstance(ck, dict) else {}
+    defaults = dict(model="adaptive", vocab_size=256, n_embd=512, n_head=8, n_layer=3,
+                    core_layers=3, n_loops=4, max_loops=6, n_stages=2, n_experts=8,
+                    n_gist=32, block_size=256, mixer="softmax", n_mem_banks=1,
+                    self_referential=False)
+    overrides = overrides or {}
+    for k in ARCH_KEYS:
+        if overrides.get(k) is not None:
+            cfg[k] = overrides[k]
+        elif k not in cfg:
+            cfg[k] = defaults[k]
+        if k not in ("model", "mixer", "self_referential"):
+            cfg[k] = int(cfg[k])
+    return cfg
+
+
+def load_model(path, device, overrides=None):
+    """Rebuild a model from a checkpoint. Returns (model, cfg)."""
+    ck = torch.load(path, map_location=device, weights_only=False)
+    state = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
+    cfg = resolve_config(ck, overrides)
+    model = build(cfg, device)
+    model.load_state_dict(state)
+    model.eval()
+    return model, cfg
+
+
 def load_tokenizer(path_hint, cfg):
     """Find the tokenizer this checkpoint was trained with."""
     for cand in (path_hint,
@@ -120,27 +149,11 @@ def main():
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
+    overrides = {k: getattr(args, k) for k in ARCH_KEYS}
     ck = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    state = ck["model"] if isinstance(ck, dict) and "model" in ck else ck
-    cfg = dict(ck.get("args") or {}) if isinstance(ck, dict) else {}
-    defaults = dict(model="adaptive", vocab_size=256, n_embd=512, n_head=8, n_layer=3,
-                    core_layers=3, n_loops=4, max_loops=6, n_stages=2, n_experts=8,
-                    n_gist=32, block_size=256, mixer="softmax", n_mem_banks=1,
-                    self_referential=False)
-    for k in ARCH_KEYS:
-        override = getattr(args, k)
-        if override is not None:
-            cfg[k] = override
-        elif k not in cfg:
-            cfg[k] = defaults[k]
-        if k in ("vocab_size", "n_embd", "n_head", "n_layer", "core_layers", "n_loops",
-                 "max_loops", "n_stages", "n_experts", "n_gist", "block_size",
-                 "n_mem_banks"):
-            cfg[k] = int(cfg[k])
-
+    cfg = resolve_config(ck, overrides)
     tok = load_tokenizer(args.tokenizer, cfg)
-    model = build(cfg, device)
-    model.load_state_dict(state)
+    model, cfg = load_model(args.checkpoint, device, overrides)
     print(f"model: {cfg['model']}  "
           + json.dumps({k: cfg[k] for k in ("n_embd", "block_size", "vocab_size")}))
     print("-" * 60)

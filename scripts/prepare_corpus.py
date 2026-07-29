@@ -168,6 +168,60 @@ def get_tokenizer(args, sample_source) -> BPETokenizer:
 
 # --------------------------------------------------------------------- writer
 
+# ------------------------------------------------------------- parallel encode
+# Pure-Python BPE encoding runs about 6 MB/s on one core, so a 2B-token corpus
+# is ~20 minutes single-threaded and a few minutes across cores. Workers load
+# the tokenizer once via the pool initializer rather than pickling it per task.
+
+_WORKER_TOK: Optional[BPETokenizer] = None
+
+
+def _init_worker(tokenizer_path: str) -> None:
+    global _WORKER_TOK
+    _WORKER_TOK = BPETokenizer.load(tokenizer_path)
+
+
+def _encode_batch(docs: List[str]) -> List[List[int]]:
+    tok = _WORKER_TOK
+    eot = tok.specials.get(EOT)
+    out = []
+    for doc in docs:
+        ids = tok.encode(doc)
+        if eot is not None:
+            ids.append(eot)
+        out.append(ids)
+    return out
+
+
+def batched(it: Iterator[str], n: int) -> Iterator[List[str]]:
+    batch: List[str] = []
+    for item in it:
+        batch.append(item)
+        if len(batch) >= n:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def encoded_documents(docs: Iterator[str], tok: BPETokenizer, tokenizer_path: str,
+                      workers: int, batch: int = 256) -> Iterator[List[int]]:
+    """Yield one id-list per document, in order, optionally across processes."""
+    if workers <= 1:
+        eot = tok.specials.get(EOT)
+        for doc in docs:
+            ids = tok.encode(doc)
+            if eot is not None:
+                ids.append(eot)
+            yield ids
+        return
+    import multiprocessing as mp
+    with mp.Pool(workers, initializer=_init_worker, initargs=(tokenizer_path,)) as pool:
+        # imap (not imap_unordered) so shard contents stay reproducible
+        for group in pool.imap(_encode_batch, batched(docs, batch)):
+            yield from group
+
+
 class ShardWriter:
     """Accumulates ids and flushes fixed-size uint16 shards to disk."""
 
@@ -257,10 +311,7 @@ def main() -> None:
     print(f"writing {dtype_name} shards to {args.out} "
           f"(target {args.target_tokens or 'all'} train tokens)")
     t0, n_docs = time.time(), 0
-    for doc in docs:
-        ids = tok.encode(doc)
-        if eot_id is not None:
-            ids.append(eot_id)
+    for ids in encoded_documents(docs, tok, args.tokenizer, args.workers):
         # Fill the held-out splits first, then everything else is train. Because
         # splits are filled by whole document, no document is ever split across
         # the train/val boundary.

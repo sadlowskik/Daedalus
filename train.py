@@ -277,6 +277,10 @@ def main():
     io.add_argument("--resume", action="store_true")
     io.add_argument("--init-from", default=None,
                     help="load weights from a checkpoint but start a fresh schedule")
+    io.add_argument("--max-hours", type=float, default=0,
+                    help="save and exit cleanly after this long (0 = no limit). "
+                         "Set it below the platform's session cap so a run ends "
+                         "at a checkpoint instead of being killed between them.")
     io.add_argument("--seed", type=int, default=1337)
     args = ap.parse_args()
 
@@ -407,6 +411,14 @@ def main():
             scaler.update()
         else:
             opt.step()
+
+        if args.max_hours and (time.time() - t0) > args.max_hours * 3600:
+            v = evaluate(args.model, model, batcher, args, ctx, args.eval_batches)
+            best = min(best, v)
+            save(args.out, step, best)
+            print(f"\nreached --max-hours at step {step:,} (val {v:.4f}). "
+                  f"Resume with:  --resume --out {args.out}")
+            return
 
         if step % args.log_interval == 0 and step > start:
             now = time.time()
