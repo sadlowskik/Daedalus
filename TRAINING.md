@@ -70,9 +70,10 @@ ones that matter:
 | **`cosmopedia-v2`** | synthetic textbooks and stories, Apache-2.0 | punches far above its weight at small scale |
 | `fineweb-edu-dedup` | SmolLM's deduplicated cut, ~220B tokens | swap in if you scale past 10B |
 | `wikipedia` | clean encyclopedic prose, **CC-BY-SA** | optional; share-alike is contagious if you release weights |
-| **`python-edu`** | quality-filtered Python | the phase-2 backbone |
-| `stack-python` / `stack-rust` | ~10k files each, ungated, small | easy start, or a smoke test |
-| `starcoderdata` | the StarCoder set — **gated** | needs terms accepted + `HF_TOKEN` |
+| **`codeparrot-clean`** | deduplicated Python, ~50GB, ungated | the phase-2 backbone |
+| `starcoderdata` | the StarCoder set, better filtered — **gated** | best quality; needs terms accepted + `HF_TOKEN` |
+| `stack-python` / `stack-rust` | only ~10k files each (~25M tokens) | smoke tests only — runs dry as a real source |
+| ~~`python-edu`~~ | **ships `blob_id`, not text** (verified 2026-07-28) | unusable without a Software Heritage S3 fetch |
 | `github-code` | raw ungated GitHub scrape | last resort; expect boilerplate |
 
 The mixture below roughly follows SmolLM's recipe, which is the closest public
@@ -83,7 +84,7 @@ range.
 
 ```bash
 python scripts/prepare_corpus.py --inspect fineweb-edu
-python scripts/prepare_corpus.py --inspect python-edu
+python scripts/prepare_corpus.py --inspect codeparrot-clean
 ```
 
 This prints the row's actual field names. The two failures it catches are a
@@ -102,7 +103,7 @@ retokenizing between phases invalidates every embedding the model has learned.
 ```bash
 pip install datasets
 python scripts/prepare_corpus.py \
-    --mix fineweb-edu=0.70 cosmopedia-v2=0.15 python-edu=0.15 \
+    --mix fineweb-edu=0.70 cosmopedia-v2=0.15 codeparrot-clean=0.15 \
     --out ./corpus/main --train-tokenizer --vocab-size 16384 \
     --tokenizer-sample-mb 300 --target-tokens 2_500_000_000 --workers 4
 ```
@@ -115,7 +116,7 @@ Then the code-heavy phase-2 corpus, **with the same tokenizer**:
 
 ```bash
 python scripts/prepare_corpus.py \
-    --mix python-edu=0.60 stack-python=0.15 fineweb-edu=0.25 \
+    --mix codeparrot-clean=0.75 fineweb-edu=0.25 \
     --out ./corpus/code --tokenizer ./corpus/main/tokenizer.json \
     --target-tokens 500_000_000 --workers 4
 ```

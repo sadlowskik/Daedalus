@@ -91,15 +91,22 @@ PRESETS = {
         split="train", kind="nl", license="CDLA-Sharing-1.0",
         quality="tiny synthetic stories; use to validate the pipeline, not to train"),
     # ---- code -------------------------------------------------------------
+    "codeparrot-clean": dict(
+        path="codeparrot/codeparrot-clean", name=None, field="content",
+        split="train", kind="code", license="mixed permissive",
+        quality="deduplicated Python, ~50GB, ungated; the practical default"),
     "python-edu": dict(
         path="HuggingFaceTB/smollm-corpus", name="python-edu", field="text",
         split="train", kind="code", license="mixed permissive",
-        quality="educational-filtered Python; best code source at this scale. "
-                "NOTE: some releases ship ids rather than text -- --inspect it"),
+        quality="NOT USABLE DIRECTLY -- verified 2026-07-28 to ship blob_id/path/"
+                "score only, no text. The content lives in Software Heritage S3 "
+                "and needs credentials + a separate fetch. Use codeparrot-clean "
+                "or starcoderdata instead"),
     "stack-python": dict(
         path="bigcode/the-stack-smol", name="data/python", field="content",
         split="train", kind="code", license="mixed permissive",
-        quality="~10k Python files; small and ungated, easy starting point"),
+        quality="only ~10k Python files (~25M tokens) -- fine for a smoke test, "
+                "will run dry as a real phase-2 source"),
     "stack-rust": dict(
         path="bigcode/the-stack-smol", name="data/rust", field="content",
         split="train", kind="code", license="mixed permissive",
@@ -263,6 +270,15 @@ def inspect_source(spec: str, args, n: int = 2) -> None:
     otherwise write an empty corpus and not find out until the loss refused to
     move) and a gated dataset that needs HF_TOKEN.
     """
+    # tolerate a copy-pasted "name=weight" from a --mix line
+    head, sep, tail = spec.rpartition("=")
+    if sep and head:
+        try:
+            float(tail)
+            spec = head
+        except ValueError:
+            pass
+
     if spec in PRESETS:
         p = PRESETS[spec]
         print(f"{spec}: {p['path']} config={p['name']} field={p['field']}")
