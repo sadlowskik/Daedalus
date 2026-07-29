@@ -216,7 +216,7 @@ logits, _ = model(ids, n_loops=8)         # think deeper at inference (train var
 Prepare data and train:
 
 ```bash
-# option A: local source files (e.g. the Python stdlib)
+# option A: local source files (e.g. the Python stdlib) -- byte-level, in RAM
 python data.py --source /usr/lib/python3.12 --out ./data
 
 # option B: fetch a Rust corpus by cloning GitHub repos (needs internet + git)
@@ -238,14 +238,56 @@ python train.py --model proteus   --steps 3000 --self-referential    # full SRWM
 Generate from a checkpoint:
 
 ```bash
-python generate.py --checkpoint checkpoint.pt --model adaptive \
-    --n-embd 512 --core-layers 3 --prompt "fn " --rep-pen 1.4
+python generate.py --checkpoint ./ckpt/nl.best.pt --prompt "def add("
 ```
 
-Architecture flags must match the run that produced the checkpoint, or
-`load_state_dict` will reject it — that includes `--mixer`, `--n-mem-banks` and
-`--self-referential`, which change the parameter shapes. (`--echo-weight` is a
-training-only loss term and adds no parameters, so generation never needs it.)
+The architecture and tokenizer are read from the checkpoint, so the training
+flags do not have to be retyped. Any flag you pass overrides what was recorded —
+which is how you use `--max-loops` as the test-time depth dial. Checkpoints
+written before the config was saved still need the flags supplied by hand.
+
+## Training at scale
+
+The toy path above is byte-level (vocab 256) and holds the whole corpus in one
+tensor. Both assumptions break past ~100M tokens, so there is a second path:
+
+```bash
+# 1. tokenizer + sharded corpus (BPE, ~4.0 bytes/token on code, 3.4 on prose)
+python scripts/prepare_corpus.py --preset fineweb-edu --out ./corpus/nl \
+    --train-tokenizer --vocab-size 32768 --target-tokens 2_000_000_000
+
+# 2. phase 1 — natural language
+python train.py --model adaptive --data ./corpus/nl --out ./ckpt/nl.pt \
+    --n-embd 768 --core-layers 4 --block-size 1024 \
+    --batch-size 8 --grad-accum 16 --max-tokens 2e9 --lr 6e-4 --warmup 2000
+
+# 3. phase 2 — code, continuing from phase 1's weights on a fresh schedule
+python scripts/prepare_corpus.py --local ./repos --ext .py .rs --out ./corpus/code \
+    --tokenizer ./corpus/nl/tokenizer.json
+python train.py --data ./corpus/code --init-from ./ckpt/nl.best.pt \
+    --out ./ckpt/code.pt --max-tokens 5e8 --lr 1.5e-4 --warmup 200
+```
+
+What the scale path adds over the toy one:
+
+| Piece | Why it is not optional |
+|---|---|
+| Byte-level **BPE** (`daedalus/bpe.py`) | ~4x fewer tokens per byte, so the same compute sees ~4x the text |
+| **Memmapped shards** (`data.Corpus`) | corpus size stops being bounded by RAM |
+| **Warmup + cosine decay** | a flat LR both diverges early and refuses to settle late |
+| **Weight tying** | at vocab 32k the embedding is otherwise paid for twice |
+| **Scaled residual init** | recurrent depth is `core_layers x n_loops`, so the 1/sqrt(2N) factor matters more here than in a plain stack |
+| **AMP + grad accumulation** | fp16/bf16 and a large effective batch on one consumer GPU |
+| **`F.scaled_dot_product_attention`** | fused/Flash kernel; the (T,T) matrix is never materialised |
+
+The tokenizer must be **the same across both phases** — train it once on a
+sample containing both prose and code. Retokenizing between phases would
+invalidate every embedding the model has learned.
+
+Phase 2 is deliberately a *continuation*, not a restart: `--init-from` loads the
+weights and starts a fresh schedule. Mixing a fraction of phase-1 data back in
+(`prepare_corpus.py --mix`) is recommended over a hard switch, which causes the
+model to forget its prose.
 
 Run the test suite (the isolation checks that validate every component):
 
