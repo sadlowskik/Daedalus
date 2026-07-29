@@ -29,6 +29,7 @@ import json
 import math
 import os
 import random
+import shutil
 import time
 
 import torch
@@ -277,6 +278,12 @@ def main():
     io.add_argument("--resume", action="store_true")
     io.add_argument("--init-from", default=None,
                     help="load weights from a checkpoint but start a fresh schedule")
+    io.add_argument("--mirror", default=None,
+                    help="second directory to copy checkpoints into, e.g. a "
+                         "mounted Google Drive. Train against fast local disk "
+                         "and keep the durable copy elsewhere.")
+    io.add_argument("--mirror-every", type=int, default=4,
+                    help="mirror every N evals (the copy is slow over FUSE)")
     io.add_argument("--max-hours", type=float, default=0,
                     help="save and exit cleanly after this long (0 = no limit). "
                          "Set it below the platform's session cap so a run ends "
@@ -394,9 +401,30 @@ def main():
                     "rng": torch.get_rng_state(), "step": step, "best": best,
                     "args": vars(args)}, path)
 
+    def mirror(paths):
+        """Copy checkpoints to durable storage.
+
+        Written to a .tmp name and then moved, because a session that dies
+        mid-copy would otherwise leave a truncated checkpoint where the good
+        one used to be -- losing the run rather than the session.
+        """
+        if not args.mirror:
+            return
+        os.makedirs(args.mirror, exist_ok=True)
+        for p in paths:
+            if not os.path.exists(p):
+                continue
+            dst = os.path.join(args.mirror, os.path.basename(p))
+            tmp = dst + ".tmp"
+            try:
+                shutil.copyfile(p, tmp)
+                os.replace(tmp, dst)
+            except OSError as e:
+                print(f"  mirror failed for {os.path.basename(p)}: {e}")
+
     # ------------------------------------------------------------------ loop
     t0 = time.time()
-    t_last, tok_last = t0, 0
+    t_last, tok_last, n_evals = t0, 0, 0
     for step in range(start, args.steps + 1):
         lr = lr_at(step, args)
         for g in opt.param_groups:
@@ -416,6 +444,9 @@ def main():
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"step": step, "val": v, "lr": lr,
                                     "tokens": tokens, "elapsed": time.time() - t0}) + "\n")
+            n_evals += 1
+            if args.mirror and n_evals % max(args.mirror_every, 1) == 0:
+                mirror([args.out, best_path, log_path])
 
         opt.zero_grad(set_to_none=True)
         total = 0.0
@@ -439,6 +470,7 @@ def main():
             v = evaluate(args.model, model, batcher, args, ctx, args.eval_batches)
             best = min(best, v)
             save(args.out, step, best)
+            mirror([args.out, best_path, log_path])
             print(f"\nreached --max-hours at step {step:,} (val {v:.4f}). "
                   f"Resume with:  --resume --out {args.out}")
             return
@@ -453,6 +485,7 @@ def main():
                   f"eta {left/3600:.1f}h", flush=True)
 
     save(args.out, args.steps, best)
+    mirror([args.out, best_path, log_path])
     print(f"\ndone. best val {best:.4f} ({best/math.log(2):.3f} bits/tok) -> {best_path}")
 
 
