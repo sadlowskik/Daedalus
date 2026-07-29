@@ -539,6 +539,20 @@ def main() -> None:
     for w in writers.values():
         w.close()
 
+    # A source that yields nothing is dropped by interleave() and its weight is
+    # redistributed, so the build *succeeds* with an ingredient missing. That is
+    # the worst kind of failure: a corpus that is 100% prose when you asked for
+    # 15% code, discovered weeks later when the model cannot write code.
+    starved = [label for label, _, _ in sources if doc_counts.get(label, 0) == 0]
+    if starved:
+        print("\n" + "!" * 70)
+        print(f"WARNING: these sources contributed ZERO documents: {', '.join(starved)}")
+        print("Their weight was redistributed across the others, so the mixture you")
+        print("got is NOT the mixture you asked for. Usual causes: the text field")
+        print("is named something else (run --inspect SPEC), the config/split is")
+        print("empty, or the dataset is gated and needs HF_TOKEN.")
+        print("!" * 70)
+
     meta = {
         "vocab_size": tok.vocab_size,
         "dtype": dtype_name,
