@@ -39,7 +39,7 @@ import os
 import random
 import sys
 import time
-from typing import Iterable, Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence
 
 import numpy as np
 
@@ -48,22 +48,70 @@ from daedalus.bpe import BPETokenizer                        # noqa: E402
 
 EOT = "<|endoftext|>"
 
-# Streamed Hugging Face presets. These were correct when written; dataset names
-# and field names do change, so check the dataset card if one 404s -- the
-# --hf-* flags below cover any dataset without needing a new preset.
+# Streamed Hugging Face presets.
+#
+# Dataset ids, config names and field names DO drift, and a preset that 404s is
+# not evidence that the pipeline is broken. Run `--inspect <source>` before
+# committing to a multi-hour build: it pulls a couple of rows and prints the
+# available fields, which is the 30-second version of finding out the hard way.
+# `--hf-dataset/--hf-config/--text-field` covers anything without a preset.
+#
+# `quality` is the editorial note that matters most at small scale. A 45M model
+# has room to learn either the structure of good text or the boilerplate of
+# scraped junk, and not both -- filtered corpora (FineWeb-Edu, Cosmopedia,
+# python-edu) buy far more per token than raw CommonCrawl or unfiltered GitHub.
 PRESETS = {
-    "fineweb-edu":  dict(path="HuggingFaceFW/fineweb-edu", name="sample-10BT",
-                         field="text", split="train"),
-    "fineweb":      dict(path="HuggingFaceFW/fineweb", name="sample-10BT",
-                         field="text", split="train"),
-    "cosmopedia":   dict(path="HuggingFaceTB/cosmopedia-100k", name=None,
-                         field="text", split="train"),
-    "tinystories":  dict(path="roneneldan/TinyStories", name=None,
-                         field="text", split="train"),
-    "stack-python": dict(path="bigcode/the-stack-smol", name="data/python",
-                         field="content", split="train"),
-    "stack-rust":   dict(path="bigcode/the-stack-smol", name="data/rust",
-                         field="content", split="train"),
+    # ---- natural language -------------------------------------------------
+    "fineweb-edu": dict(
+        path="HuggingFaceFW/fineweb-edu", name="sample-10BT", field="text",
+        split="train", kind="nl", license="ODC-By",
+        quality="classifier-filtered educational web text; the default choice"),
+    "fineweb-edu-dedup": dict(
+        path="HuggingFaceTB/smollm-corpus", name="fineweb-edu-dedup", field="text",
+        split="train", kind="nl", license="ODC-By",
+        quality="SmolLM's deduplicated FineWeb-Edu; ~220B tokens"),
+    "cosmopedia-v2": dict(
+        path="HuggingFaceTB/smollm-corpus", name="cosmopedia-v2", field="text",
+        split="train", kind="nl", license="Apache-2.0",
+        quality="synthetic textbooks/stories; punches above its weight for small models"),
+    "cosmopedia-100k": dict(
+        path="HuggingFaceTB/cosmopedia-100k", name=None, field="text",
+        split="train", kind="nl", license="Apache-2.0",
+        quality="100k-row taster of Cosmopedia; good for a pipeline smoke test"),
+    "fineweb": dict(
+        path="HuggingFaceFW/fineweb", name="sample-10BT", field="text",
+        split="train", kind="nl", license="ODC-By",
+        quality="unfiltered web; larger but markedly worse per token than -edu"),
+    "wikipedia": dict(
+        path="wikimedia/wikipedia", name="20231101.en", field="text",
+        split="train", kind="nl", license="CC-BY-SA",
+        quality="clean encyclopedic prose; note the share-alike licence"),
+    "tinystories": dict(
+        path="roneneldan/TinyStories", name=None, field="text",
+        split="train", kind="nl", license="CDLA-Sharing-1.0",
+        quality="tiny synthetic stories; use to validate the pipeline, not to train"),
+    # ---- code -------------------------------------------------------------
+    "python-edu": dict(
+        path="HuggingFaceTB/smollm-corpus", name="python-edu", field="text",
+        split="train", kind="code", license="mixed permissive",
+        quality="educational-filtered Python; best code source at this scale. "
+                "NOTE: some releases ship ids rather than text -- --inspect it"),
+    "stack-python": dict(
+        path="bigcode/the-stack-smol", name="data/python", field="content",
+        split="train", kind="code", license="mixed permissive",
+        quality="~10k Python files; small and ungated, easy starting point"),
+    "stack-rust": dict(
+        path="bigcode/the-stack-smol", name="data/rust", field="content",
+        split="train", kind="code", license="mixed permissive",
+        quality="~10k Rust files; the language the earlier flagship run used"),
+    "starcoderdata": dict(
+        path="bigcode/starcoderdata", name="python", field="content",
+        split="train", kind="code", license="mixed permissive",
+        quality="the StarCoder training set; GATED -- accept terms + set HF_TOKEN"),
+    "github-code": dict(
+        path="codeparrot/github-code-clean", name="Python-all", field="code",
+        split="train", kind="code", license="mixed permissive",
+        quality="ungated GitHub scrape; least filtered, expect boilerplate"),
 }
 
 
@@ -102,37 +150,160 @@ def iter_hf(path: str, name: Optional[str], split: str, field: str) -> Iterator[
             yield text
 
 
-def build_source(args) -> Iterator[str]:
+def parse_spec(spec: str, args) -> tuple:
+    """`"fineweb-edu=0.7"` or `"local:./repos=0.3"` -> (label, weight, factory).
+
+    A factory rather than an iterator, because a mixture may need to restart a
+    stream that ran dry, and because the tokenizer sample must not consume
+    documents that the writer is about to need.
+    """
+    body, _, weight = spec.rpartition("=")
+    if not body:                                   # no "=" -> weight defaults to 1
+        body, weight = spec, "1"
+    try:
+        w = float(weight)
+    except ValueError:
+        raise SystemExit(f"bad weight in --mix spec {spec!r}: expected name=weight")
+
+    if body.startswith("local:"):
+        root = body[len("local:"):]
+        if not os.path.isdir(root):
+            raise SystemExit(f"--mix local source {root!r} is not a directory")
+        return body, w, lambda: iter_local(root, args.ext)
+    if body.startswith("hf:"):
+        # hf:<path>[:<config>][#<field>]
+        rest, _, field = body[len("hf:"):].partition("#")
+        path, _, config = rest.partition(":")
+        return body, w, (lambda: iter_hf(path, config or None, args.hf_split,
+                                         field or args.text_field))
+    if body in PRESETS:
+        p = PRESETS[body]
+        return body, w, lambda: iter_hf(p["path"], p["name"], p["split"], p["field"])
+    raise SystemExit(f"unknown source {body!r}. Presets: {', '.join(sorted(PRESETS))}\n"
+                     "or use local:<dir> / hf:<path>[:<config>][#<field>]")
+
+
+def build_sources(args) -> List[tuple]:
+    """Resolve every requested source into (label, weight, factory) triples."""
+    if args.mix:
+        return [parse_spec(s, args) for s in args.mix]
     if args.local:
-        return iter_local(args.local, args.ext)
+        return [(f"local:{args.local}", 1.0, lambda: iter_local(args.local, args.ext))]
     if args.preset:
         p = PRESETS[args.preset]
-        return iter_hf(p["path"], p["name"], p["split"], p["field"])
+        return [(args.preset, 1.0,
+                 lambda: iter_hf(p["path"], p["name"], p["split"], p["field"]))]
     if args.hf_dataset:
-        return iter_hf(args.hf_dataset, args.hf_config, args.hf_split, args.text_field)
-    raise SystemExit("pick a source: --local, --preset, or --hf-dataset")
+        return [(args.hf_dataset, 1.0,
+                 lambda: iter_hf(args.hf_dataset, args.hf_config, args.hf_split,
+                                 args.text_field))]
+    raise SystemExit("pick a source: --preset, --local, --hf-dataset, or --mix")
 
 
-def interleave(primary: Iterator[str], secondary: Iterator[str], p_secondary: float,
-               seed: int = 1337) -> Iterator[str]:
-    """Randomly interleave two document streams.
+def interleave(sources: Sequence[tuple], seed: int = 1337,
+               counts: Optional[Dict[str, int]] = None) -> Iterator[str]:
+    """Randomly interleave N weighted document streams.
 
     Mixing beats a hard phase switch: training purely on prose and *then* purely
     on code causes the model to forget the prose (catastrophic forgetting,
     McCloskey & Cohen 1989). Keeping a fraction of each throughout, and shifting
     the ratio between phases, keeps both.
+
+    Weights are per *document*, not per token, so a source of long documents
+    contributes more tokens than its weight suggests. The realised token shares
+    are recorded in meta.json -- read those rather than assuming the weights.
+
+    A stream that runs dry is dropped and the remaining weights renormalise, so
+    a small source cannot silently truncate the whole build.
     """
     rng = random.Random(seed)
-    a_done = b_done = False
-    while not (a_done and b_done):
-        take_b = (not b_done) and (a_done or rng.random() < p_secondary)
+    live = [(label, w, factory()) for label, w, factory in sources if w > 0]
+    # Caller-supplied so the tallies survive an early break on --target-tokens;
+    # a generator that never runs to completion cannot report them itself.
+    counts = {} if counts is None else counts
+    counts.update({label: 0 for label, _, _ in live})
+    while live:
+        total = sum(w for _, w, _ in live)
+        pick = rng.random() * total
+        idx, running = len(live) - 1, 0.0
+        for i, (_, w, _) in enumerate(live):
+            running += w
+            if pick < running:
+                idx = i
+                break
+        label, _, stream = live[idx]
         try:
-            yield next(secondary) if take_b else next(primary)
+            doc = next(stream)
         except StopIteration:
-            if take_b:
-                b_done = True
-            else:
-                a_done = True
+            live.pop(idx)
+            continue
+        counts[label] += 1
+        yield doc
+
+
+# -------------------------------------------------------------- introspection
+
+def list_sources() -> None:
+    for kind in ("nl", "code"):
+        print(f"\n{'NATURAL LANGUAGE' if kind == 'nl' else 'CODE'}")
+        for name, p in sorted(PRESETS.items()):
+            if p["kind"] != kind:
+                continue
+            cfg = f"[{p['name']}]" if p["name"] else ""
+            print(f"  {name:<20} {p['path']} {cfg}")
+            print(f"  {'':<20} {p['quality']}")
+            print(f"  {'':<20} licence: {p['license']}")
+
+
+def inspect_source(spec: str, args, n: int = 2) -> None:
+    """Pull a couple of rows and show what is actually in them.
+
+    Worth 30 seconds before any multi-hour build. The two failures this catches
+    are a dataset whose text lives under a different field name (you would
+    otherwise write an empty corpus and not find out until the loss refused to
+    move) and a gated dataset that needs HF_TOKEN.
+    """
+    if spec in PRESETS:
+        p = PRESETS[spec]
+        print(f"{spec}: {p['path']} config={p['name']} field={p['field']}")
+        print(f"  {p['quality']}\n  licence: {p['license']}")
+
+    label, _, factory = parse_spec(spec, args)
+    if spec in PRESETS or spec.startswith("hf:"):
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise SystemExit("--inspect on a HF source needs `datasets`")
+        if spec in PRESETS:
+            p = PRESETS[spec]
+            path, cfg, split, field = p["path"], p["name"], p["split"], p["field"]
+        else:
+            rest, _, field = spec[len("hf:"):].partition("#")
+            path, _, cfg = rest.partition(":")
+            cfg, split = cfg or None, args.hf_split
+            field = field or args.text_field
+        try:
+            ds = load_dataset(path, name=cfg, split=split, streaming=True)
+            row = next(iter(ds))
+        except Exception as e:                       # noqa: BLE001 - diagnostic path
+            print(f"  FAILED: {type(e).__name__}: {e}")
+            print("  If this mentions auth/gated: accept the terms on the dataset "
+                  "page and set HF_TOKEN.")
+            return
+        print(f"  fields: {sorted(row.keys())}")
+        if field not in row:
+            print(f"  !! field {field!r} IS NOT PRESENT -- pass --text-field, "
+                  f"or use hf:{path}#<field>")
+        else:
+            sample = str(row[field])[:300].replace("\n", "\\n")
+            print(f"  {field}[:300]: {sample}")
+        return
+
+    docs = factory()
+    for i, doc in enumerate(docs):
+        if i >= n:
+            break
+        print(f"  doc {i}: {doc[:300]!r}")
 
 
 # ------------------------------------------------------------------ tokenizer
@@ -263,13 +434,18 @@ def main() -> None:
     src.add_argument("--text-field", default="text")
 
     mix = ap.add_argument_group("mixing")
-    mix.add_argument("--mix", type=float, default=0.0,
-                     help="fraction of documents drawn from the secondary source")
-    mix.add_argument("--mix-local", help="secondary source: local directory")
-    mix.add_argument("--mix-preset", choices=sorted(PRESETS))
+    mix.add_argument("--mix", nargs="+", metavar="SPEC=WEIGHT", default=None,
+                     help="weighted blend, e.g. --mix fineweb-edu=0.7 "
+                          "cosmopedia-v2=0.15 local:./repos=0.15. Each SPEC is a "
+                          "preset name, local:<dir>, or hf:<path>[:<config>][#<field>]")
+
+    ap.add_argument("--list-sources", action="store_true",
+                    help="print the available presets and exit")
+    ap.add_argument("--inspect", metavar="SPEC",
+                    help="show a sample row and its field names, then exit")
 
     out = ap.add_argument_group("output")
-    out.add_argument("--out", required=True)
+    out.add_argument("--out", default=None)
     out.add_argument("--target-tokens", type=int, default=0,
                      help="stop after roughly this many train tokens (0 = all)")
     out.add_argument("--shard-tokens", type=int, default=100_000_000)
@@ -286,23 +462,37 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1337)
     args = ap.parse_args()
 
+    if args.list_sources:
+        list_sources()
+        return
+    if args.inspect:
+        inspect_source(args.inspect, args)
+        return
+    if not args.out:
+        raise SystemExit("--out is required (unless --list-sources / --inspect)")
+
     os.makedirs(args.out, exist_ok=True)
     args.tokenizer = args.tokenizer or os.path.join(args.out, "tokenizer.json")
 
-    # The tokenizer sample is drawn from a *separate* pass over the source so it
-    # is not consumed from the stream that gets written.
-    tok = get_tokenizer(args, build_source(args))
+    sources = build_sources(args)
+    total_w = sum(w for _, w, _ in sources)
+    print("sources:")
+    for label, w, _ in sources:
+        print(f"  {w/total_w:6.1%}  {label}")
+
+    # The tokenizer sample is drawn from a *separate* pass over the sources, so
+    # it does not consume documents the writer is about to need. It samples the
+    # same mixture, which matters: a tokenizer fitted on prose alone handles
+    # `__init__` and `=>` badly.
+    tok = get_tokenizer(args, interleave(sources, args.seed))
     if tok.vocab_size > 65535:
         dtype, dtype_name = np.uint32, "uint32"
     else:
         dtype, dtype_name = np.uint16, "uint16"
     eot_id = tok.specials.get(EOT)
 
-    docs = build_source(args)
-    if args.mix > 0:
-        sec_args = argparse.Namespace(**vars(args))
-        sec_args.local, sec_args.preset, sec_args.hf_dataset = args.mix_local, args.mix_preset, None
-        docs = interleave(docs, build_source(sec_args), args.mix, args.seed)
+    doc_counts: Dict[str, int] = {}
+    docs = interleave(sources, args.seed, doc_counts)
 
     writers = {s: ShardWriter(args.out, s, args.shard_tokens, dtype)
                for s in ("val", "test", "train")}
@@ -341,9 +531,12 @@ def main() -> None:
         "documents": n_docs,
         "tokens": {s: w.total for s, w in writers.items()},
         "shards": {s: w.index for s, w in writers.items()},
-        "source": {k: v for k, v in vars(args).items()
-                   if k in ("preset", "local", "hf_dataset", "hf_config", "mix",
-                            "mix_local", "mix_preset", "ext")},
+        "sources": {label: {"weight": w / total_w,
+                            "documents": doc_counts.get(label, 0),
+                            "doc_share": doc_counts.get(label, 0) / max(n_docs, 1)}
+                    for label, w, _ in sources},
+        "args": {k: v for k, v in vars(args).items()
+                 if k in ("preset", "local", "hf_dataset", "hf_config", "mix", "ext")},
     }
     with open(os.path.join(args.out, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

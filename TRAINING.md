@@ -53,6 +53,47 @@ whole thesis — recurrent depth buys depth with compute instead of memory — a
 it is why a 45M model here is not comparable to a 45M dense model. It also means
 the FLOPs bill is ~4x what the parameter count suggests. Budget accordingly.
 
+## Where the data comes from
+
+**Filtered beats big, and it is not close.** A 45M model has room to learn
+either the structure of good text or the boilerplate of scraped junk, not both.
+This is also the diagnosis of the earlier 37M Rust run: a corpus of whole GitHub
+repos is dominated by near-duplicate files, generated code and license headers,
+so the loss fell while capability did not follow.
+
+`python scripts/prepare_corpus.py --list-sources` prints the full table. The
+ones that matter:
+
+| Source | What it is | Use it for |
+|---|---|---|
+| **`fineweb-edu`** | classifier-filtered educational web text, ODC-By | the phase-1 backbone |
+| **`cosmopedia-v2`** | synthetic textbooks and stories, Apache-2.0 | punches far above its weight at small scale |
+| `fineweb-edu-dedup` | SmolLM's deduplicated cut, ~220B tokens | swap in if you scale past 10B |
+| `wikipedia` | clean encyclopedic prose, **CC-BY-SA** | optional; share-alike is contagious if you release weights |
+| **`python-edu`** | quality-filtered Python | the phase-2 backbone |
+| `stack-python` / `stack-rust` | ~10k files each, ungated, small | easy start, or a smoke test |
+| `starcoderdata` | the StarCoder set — **gated** | needs terms accepted + `HF_TOKEN` |
+| `github-code` | raw ungated GitHub scrape | last resort; expect boilerplate |
+
+The mixture below roughly follows SmolLM's recipe, which is the closest public
+precedent to what you are building and was tuned for models in exactly this size
+range.
+
+**Verify a source before committing hours to it:**
+
+```bash
+python scripts/prepare_corpus.py --inspect fineweb-edu
+python scripts/prepare_corpus.py --inspect python-edu
+```
+
+This prints the row's actual field names. The two failures it catches are a
+dataset whose text moved to a different field — you would otherwise write an
+empty corpus and only find out when the loss refused to move — and a gated
+dataset that needs `HF_TOKEN` set.
+
+If you would rather stay offline, `local:<dir>` mixes in any directory of files,
+and `scripts/fetch_rust.py` still clones repos the old way.
+
 ## Step 0 — corpus and tokenizer (once)
 
 Do this once, save the result, never repeat it. The tokenizer especially:
@@ -61,30 +102,42 @@ retokenizing between phases invalidates every embedding the model has learned.
 ```bash
 pip install datasets
 python scripts/prepare_corpus.py \
-    --preset fineweb-edu --mix 0.15 --mix-preset stack-python \
+    --mix fineweb-edu=0.70 cosmopedia-v2=0.15 python-edu=0.15 \
     --out ./corpus/main --train-tokenizer --vocab-size 16384 \
     --tokenizer-sample-mb 300 --target-tokens 2_500_000_000 --workers 4
 ```
 
-Note the `--mix 0.15`: the phase-1 corpus contains 15% code from the start. A
-tokenizer trained on prose alone handles `__init__` and `=>` terribly, and a
-model that has never seen code in phase 1 has more to forget in phase 2.
+That 15% code in the *prose* phase is deliberate. A tokenizer fitted on prose
+alone handles `__init__` and `=>` badly, and a model that has never seen code in
+phase 1 has far more to forget in phase 2.
 
-Then build the code-heavy phase-2 corpus **with the same tokenizer**:
+Then the code-heavy phase-2 corpus, **with the same tokenizer**:
 
 ```bash
 python scripts/prepare_corpus.py \
-    --preset stack-python --mix 0.25 --mix-preset fineweb-edu \
+    --mix python-edu=0.60 stack-python=0.15 fineweb-edu=0.25 \
     --out ./corpus/code --tokenizer ./corpus/main/tokenizer.json \
     --target-tokens 500_000_000 --workers 4
 ```
 
-The 25% prose in the *code* phase is the same idea in reverse — it is what stops
-the model forgetting English while it learns Python.
+The 25% prose here is the same idea in reverse — it is what stops the model
+forgetting English while it learns Python.
+
+Weights are per **document**, not per token, so a source of long documents
+contributes more tokens than its weight suggests, and a source that runs dry is
+dropped with the rest renormalised. `meta.json` records the realised document
+shares; read those rather than trusting the weights you asked for.
 
 **Gate:** `meta.json` should report ~3.5–4.0 bytes/token. Below 3.0 means the
 tokenizer did not train properly and every later number will be worse for no
 architectural reason.
+
+**On licences, since you intend to release weights.** FineWeb-Edu and Cosmopedia
+are ODC-By / Apache-2.0 and unproblematic. Wikipedia is CC-BY-SA, whose
+share-alike terms are the one genuinely awkward ingredient here. The Stack
+honours opt-outs and filters to permissive licences, which is why it is
+preferable to a raw GitHub scrape. None of this is legal advice — just record
+your mixture in the model card, which `meta.json` now gives you for free.
 
 ## Step 0.5 — measure throughput before committing
 
